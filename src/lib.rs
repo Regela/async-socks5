@@ -59,6 +59,8 @@ pub enum Error {
     Response(UnsuccessfulReply),
     #[error("{0:?} length is more than 255 bytes")]
     TooLongString(StringKind),
+    #[error("{0:?} is unsupported")]
+    Unsupported(&'static str),
 }
 
 /// Required to mark which string is too long.
@@ -112,6 +114,7 @@ trait ReadExt: AsyncReadExt + Unpin {
             0x01 => Command::Connect,
             0x02 => Command::Bind,
             0x03 => Command::UdpAssociate,
+            0xf3 => Command::UdpTun, // extended SOCKS5 request CMD for UDP over TCP.
             _ => return Err(Error::InvalidCommand(value)),
         };
 
@@ -238,6 +241,15 @@ trait ReadExt: AsyncReadExt + Unpin {
         let addr = self.read_target_addr().await?;
         Ok(addr)
     }
+
+    async fn read_methods(&mut self) -> Result<Vec<AuthMethod>> {
+        let nmethods = self.read_u8().await?;
+        let mut res = Vec::with_capacity(nmethods as usize);
+        for _ in 0..nmethods {
+            res.push(self.read_method().await?);
+        }
+        Ok(res)
+    }
 }
 
 #[async_trait]
@@ -347,8 +359,8 @@ trait WriteExt: AsyncWriteExt + Unpin {
 impl<T: AsyncWriteExt + Unpin> WriteExt for T {}
 
 async fn username_password_auth<S>(stream: &mut S, auth: Auth) -> Result<()>
-where
-    S: WriteExt + ReadExt + Send,
+    where
+        S: WriteExt + ReadExt + Send,
 {
     stream.write_auth_version().await?;
     stream
@@ -369,9 +381,9 @@ async fn init<S, A>(
     addr: A,
     auth: Option<Auth>,
 ) -> Result<AddrKind>
-where
-    S: WriteExt + ReadExt + Send,
-    A: Into<AddrKind>,
+    where
+        S: WriteExt + ReadExt + Send,
+        A: Into<AddrKind>,
 {
     let addr: AddrKind = addr.into();
 
@@ -409,9 +421,9 @@ pub struct Auth {
 impl Auth {
     /// Constructs `Auth` with the specified username and a password.
     pub fn new<U, P>(username: U, password: P) -> Self
-    where
-        U: Into<String>,
-        P: Into<String>,
+        where
+            U: Into<String>,
+            P: Into<String>,
     {
         Self {
             username: username.into(),
@@ -435,12 +447,16 @@ pub enum AuthMethod {
     Private(u8),
 }
 
+#[derive(Debug, Eq, PartialEq, Copy, Clone, Hash)]
 enum Command {
     Connect = 0x01,
     Bind = 0x02,
     UdpAssociate = 0x03,
+    UdpTun = 0xf3,
 }
 
+
+#[derive(Debug, Eq, PartialEq, Copy, Clone, Hash)]
 enum Atyp {
     V4 = 0x01,
     Domain = 0x03,
@@ -567,9 +583,9 @@ impl From<SocketAddrV6> for AddrKind {
 /// # }
 /// ```
 pub async fn connect<S, A>(socket: &mut S, addr: A, auth: Option<Auth>) -> Result<AddrKind>
-where
-    S: AsyncWriteExt + AsyncReadExt + Send + Unpin,
-    A: Into<AddrKind>,
+    where
+        S: AsyncWriteExt + AsyncReadExt + Send + Unpin,
+        A: Into<AddrKind>,
 {
     init(socket, Command::Connect, addr, auth).await
 }
@@ -600,15 +616,15 @@ pub struct SocksListener<S> {
 }
 
 impl<S> SocksListener<S>
-where
-    S: AsyncWriteExt + AsyncReadExt + Send + Unpin,
+    where
+        S: AsyncWriteExt + AsyncReadExt + Send + Unpin,
 {
     /// Creates `SocksListener`. Performs the [`BIND`] command under the hood.
     ///
     /// [`BIND`]: https://tools.ietf.org/html/rfc1928#page-6
     pub async fn bind<A>(mut stream: S, addr: A, auth: Option<Auth>) -> Result<Self>
-    where
-        A: Into<AddrKind>,
+        where
+            A: Into<AddrKind>,
     {
         let addr = init(&mut stream, Command::Bind, addr, auth).await?;
         Ok(Self {
@@ -636,8 +652,8 @@ pub struct SocksDatagram<S> {
 }
 
 impl<S> SocksDatagram<S>
-where
-    S: AsyncWriteExt + AsyncReadExt + Send + Unpin,
+    where
+        S: AsyncWriteExt + AsyncReadExt + Send + Unpin,
 {
     /// Creates `SocksDatagram`. Performs [`UDP ASSOCIATE`] under the hood.
     ///
@@ -648,8 +664,8 @@ where
         auth: Option<Auth>,
         association_addr: Option<A>,
     ) -> Result<Self>
-    where
-        A: Into<AddrKind>,
+        where
+            A: Into<AddrKind>,
     {
         let addr = association_addr
             .map(Into::into)
@@ -695,8 +711,8 @@ where
     }
 
     pub async fn send_to<A>(&self, buf: &[u8], addr: A) -> Result<usize>
-    where
-        A: Into<AddrKind>,
+        where
+            A: Into<AddrKind>,
     {
         let addr: AddrKind = addr.into();
         let bytes = Self::write_request(buf, addr).await?;
@@ -729,11 +745,123 @@ where
 
     fn get_buf_size(addr_size: usize, buf_len: usize) -> usize {
         2 // reserved
-                + 1 // fragment id
-                + addr_size
-                + buf_len
+            + 1 // fragment id
+            + addr_size
+            + buf_len
     }
 }
+
+#[async_trait]
+pub trait SocksServer<S, T: Send> where
+    S: AsyncWriteExt + AsyncReadExt + Send + Unpin + 'static, {
+    async fn handle_command(&self, _addr: AddrKind) -> Result<T> { Err(Error::Unsupported("Connect")) }
+    async fn handle_bind(&self, _addr: AddrKind) -> Result<T> { Err(Error::Unsupported("Bind")) }
+    async fn handle_udp_associate(&self, _addr: AddrKind) -> Result<(T, u16)> { Err(Error::Unsupported("UdpAssociate")) }
+    async fn handle_udp_tun(&self, _addr: AddrKind) -> Result<T> { Err(Error::Unsupported("UdpTun")) }
+    async fn select_auth_method(&self, _methods: Vec<AuthMethod>) -> AuthMethod { AuthMethod::None }
+    async fn auth_user_password(&self, _auth: Auth) -> bool { true }
+    async fn auth_custom(&self, _method: AuthMethod, _socket: S) -> bool { true }
+
+
+    async fn handle(&self, socket: &mut S) -> Result<T> {
+        socket.read_version().await?;
+        let methods = socket.read_methods().await?;
+        let method = self.select_auth_method(methods).await;
+        socket.write_version().await?;
+        match method {
+            AuthMethod::None => {}
+            _ => todo!()
+        }
+        socket.write_method(AuthMethod::None).await?;
+
+
+        socket.read_version().await?;
+        let command = socket.read_command().await?;
+        match command {
+            Command::Connect => {
+                socket.read_reserved().await?;
+                let addr = socket.read_target_addr().await?;
+                match self.handle_command(addr.clone()).await {
+                    Ok(res) => {
+                        socket.write_version().await?;
+                        socket.write_u8(0).await?;
+                        socket.write_reserved().await?;
+                        socket.write_target_addr(&addr).await?;
+                        Ok(res)
+                    }
+                    Err(err) => {
+                        socket.write_version().await?;
+                        socket.write_u8(1).await?;
+                        socket.write_reserved().await?;
+                        socket.write_target_addr(&addr).await?;
+                        Err(err)
+                    }
+                }
+            }
+            Command::Bind => {
+                socket.read_reserved().await?;
+                let addr = socket.read_target_addr().await?;
+                match self.handle_bind(addr.clone()).await {
+                    Ok(res) => {
+                        socket.write_version().await?;
+                        socket.write_u8(0).await?;
+                        socket.write_reserved().await?;
+                        socket.write_target_addr(&addr).await?;
+                        Ok(res)
+                    }
+                    Err(err) => {
+                        socket.write_version().await?;
+                        socket.write_u8(1).await?;
+                        socket.write_reserved().await?;
+                        socket.write_target_addr(&addr).await?;
+                        Err(err)
+                    }
+                }
+            }
+            Command::UdpAssociate => {
+                socket.read_reserved().await?;
+                let addr = socket.read_target_addr().await?;
+                match self.handle_udp_associate(addr.clone()).await {
+                    Ok((res, port)) => {
+                        socket.write_version().await?;
+                        socket.write_u8(0).await?;
+                        socket.write_reserved().await?;
+                        socket.write_target_addr(&AddrKind::Ip(SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::from(0), port)))).await?;
+                        Ok(res)
+                    }
+                    Err(err) => {
+                        socket.write_version().await?;
+                        socket.write_u8(1).await?;
+                        socket.write_reserved().await?;
+                        socket.write_target_addr(&addr).await?;
+                        Err(err)
+                    }
+                }
+            }
+            Command::UdpTun => {
+                socket.read_reserved().await?;
+                let addr = socket.read_target_addr().await?;
+                match self.handle_udp_tun(addr.clone()).await {
+                    Ok(res) => {
+                        socket.write_version().await?;
+                        socket.write_u8(0).await?;
+                        socket.write_reserved().await?;
+                        socket.write_target_addr(&addr).await?;
+                        Ok(res)
+                    }
+                    Err(err) => {
+                        socket.write_version().await?;
+                        socket.write_u8(1).await?;
+                        socket.write_reserved().await?;
+                        socket.write_target_addr(&addr).await?;
+                        Err(err)
+                    }
+                }
+            }
+        }
+    }
+}
+
 
 // Tests
 // *****************************************************************************
@@ -756,8 +884,8 @@ mod tests {
             AddrKind::Domain("google.com".to_string(), 80),
             auth,
         )
-        .await
-        .unwrap();
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
@@ -805,8 +933,8 @@ mod tests {
     #[async_trait]
     trait UdpClient {
         async fn send_to<A>(&mut self, buf: &[u8], addr: A) -> Result<usize>
-        where
-            A: Into<AddrKind> + Send;
+            where
+                A: Into<AddrKind> + Send;
 
         async fn recv_from(&mut self, buf: &mut [u8]) -> Result<(usize, AddrKind)>;
     }
@@ -814,8 +942,8 @@ mod tests {
     #[async_trait]
     impl UdpClient for TestDatagram {
         async fn send_to<A>(&mut self, buf: &[u8], addr: A) -> Result<usize, Error>
-        where
-            A: Into<AddrKind> + Send,
+            where
+                A: Into<AddrKind> + Send,
         {
             SocksDatagram::send_to(self, buf, addr).await
         }
@@ -828,8 +956,8 @@ mod tests {
     #[async_trait]
     impl UdpClient for TestHalves {
         async fn send_to<A>(&mut self, buf: &[u8], addr: A) -> Result<usize, Error>
-        where
-            A: Into<AddrKind> + Send,
+            where
+                A: Into<AddrKind> + Send,
         {
             self.1.send_to(buf, addr).await
         }
