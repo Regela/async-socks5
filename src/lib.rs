@@ -757,7 +757,7 @@ pub trait SocksServer<S, T: Send> where
     async fn handle_command(&self, _addr: AddrKind) -> Result<T> { Err(Error::Unsupported("Connect")) }
     async fn handle_bind(&self, _addr: AddrKind) -> Result<T> { Err(Error::Unsupported("Bind")) }
     async fn handle_udp_associate(&self, _addr: AddrKind) -> Result<(T, u16)> { Err(Error::Unsupported("UdpAssociate")) }
-    async fn handle_udp_tun(&self, _addr: AddrKind) -> Result<T> { Err(Error::Unsupported("UdpTun")) }
+    async fn handle_udp_tun(&self, _addr: AddrKind) -> Result<(T, u16)> { Err(Error::Unsupported("UdpTun")) }
     async fn select_auth_method(&self, _methods: Vec<AuthMethod>) -> AuthMethod { AuthMethod::None }
     async fn auth_user_password(&self, _auth: Auth) -> bool { true }
     async fn auth_custom(&self, _method: AuthMethod, _socket: S) -> bool { true }
@@ -773,6 +773,7 @@ pub trait SocksServer<S, T: Send> where
             _ => todo!()
         }
         socket.write_method(AuthMethod::None).await?;
+        socket.flush().await?;
 
 
         socket.read_version().await?;
@@ -787,6 +788,7 @@ pub trait SocksServer<S, T: Send> where
                         socket.write_u8(0).await?;
                         socket.write_reserved().await?;
                         socket.write_target_addr(&addr).await?;
+                        socket.flush().await?;
                         Ok(res)
                     }
                     Err(err) => {
@@ -794,6 +796,7 @@ pub trait SocksServer<S, T: Send> where
                         socket.write_u8(1).await?;
                         socket.write_reserved().await?;
                         socket.write_target_addr(&addr).await?;
+                        socket.flush().await?;
                         Err(err)
                     }
                 }
@@ -807,6 +810,7 @@ pub trait SocksServer<S, T: Send> where
                         socket.write_u8(0).await?;
                         socket.write_reserved().await?;
                         socket.write_target_addr(&addr).await?;
+                        socket.flush().await?;
                         Ok(res)
                     }
                     Err(err) => {
@@ -814,6 +818,7 @@ pub trait SocksServer<S, T: Send> where
                         socket.write_u8(1).await?;
                         socket.write_reserved().await?;
                         socket.write_target_addr(&addr).await?;
+                        socket.flush().await?;
                         Err(err)
                     }
                 }
@@ -827,6 +832,7 @@ pub trait SocksServer<S, T: Send> where
                         socket.write_u8(0).await?;
                         socket.write_reserved().await?;
                         socket.write_target_addr(&AddrKind::Ip(SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::from(0), port)))).await?;
+                        socket.flush().await?;
                         Ok(res)
                     }
                     Err(err) => {
@@ -834,6 +840,7 @@ pub trait SocksServer<S, T: Send> where
                         socket.write_u8(1).await?;
                         socket.write_reserved().await?;
                         socket.write_target_addr(&addr).await?;
+                        socket.flush().await?;
                         Err(err)
                     }
                 }
@@ -842,11 +849,12 @@ pub trait SocksServer<S, T: Send> where
                 socket.read_reserved().await?;
                 let addr = socket.read_target_addr().await?;
                 match self.handle_udp_tun(addr.clone()).await {
-                    Ok(res) => {
+                    Ok((res, port)) => {
                         socket.write_version().await?;
                         socket.write_u8(0).await?;
                         socket.write_reserved().await?;
-                        socket.write_target_addr(&addr).await?;
+                        socket.write_target_addr(&AddrKind::Ip(SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::from(0), port)))).await?;
+                        socket.flush().await?;
                         Ok(res)
                     }
                     Err(err) => {
@@ -854,6 +862,7 @@ pub trait SocksServer<S, T: Send> where
                         socket.write_u8(1).await?;
                         socket.write_reserved().await?;
                         socket.write_target_addr(&addr).await?;
+                        socket.flush().await?;
                         Err(err)
                     }
                 }
